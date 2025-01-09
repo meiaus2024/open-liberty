@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2011, 2024 IBM Corporation and others.
+ * Copyright (c) 2011, 2025 IBM Corporation and others.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License 2.0
  * which accompanies this distribution, and is available at
@@ -22,6 +22,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -36,6 +37,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.Charset;
+import java.nio.file.*;
 import java.security.AccessController;
 import java.security.KeyStore;
 import java.security.PrivilegedAction;
@@ -237,6 +239,9 @@ public class LibertyServer implements LogMonitorClient {
     //should the check for repeated features throw an exception
     protected static final String REPEAT_FEATURE_CHECK_ERROR_PROP = "fat.test.repeat.feature.check.error";
     protected static final boolean REPEAT_FEATURE_CHECK_ERROR = Boolean.parseBoolean(PrivHelper.getProperty(REPEAT_FEATURE_CHECK_ERROR_PROP, "true"));
+
+    //FIPS 140-2
+    protected static final boolean GLOBAL_FIPS_140_2 = Boolean.parseBoolean(PrivHelper.getProperty("global.fips_140-2", "false"));
 
     //FIPS 140-3
     protected static final boolean GLOBAL_FIPS_140_3 = Boolean.parseBoolean(PrivHelper.getProperty("global.fips_140-3", "false"));
@@ -1717,6 +1722,22 @@ public class LibertyServer implements LogMonitorClient {
                     JVM_ARGS += " -Djava.security.manager=allow";
                 }
             }
+        }
+
+        //FIPS 140-2
+        // if we have FIPS 140-2 enabled, and the matched java/platform, add JVM Arg and update java.security
+        if (isFIPS140_2EnabledAndSupported()) {
+            Log.info(c, "startServerWithArgs", "Liberty server is running JDK version: " + info.majorVersion() + " and vendor: " + info.VENDOR);
+            Log.info(c, "startServerWithArgs", "FIPS 140-2 global build properties is set for server " + getServerName()
+                                               + " with IBM Java 8, adding JVM arguments to run with FIPS 140-2 enabled");
+
+            JVM_ARGS += " -Dcom.ibm.jsse2.usefipsprovider=true";
+            JVM_ARGS += " -Dcom.ibm.jsse2.usefipsProviderName=IBMJCEPlusFIPS";
+            // JVM_ARGS += " -Djavax.net.debug=all";  // Uncomment as needed for additional debugging
+
+           //add provider IBMJCEPlusFIPS
+           updateJavaDotSecurity(info.javaHome());
+
         }
 
         //FIPS 140-3
@@ -7791,6 +7812,93 @@ public class LibertyServer implements LogMonitorClient {
         return false;
     }
 
+    //FIPS 140-2
+    public boolean isFIPS140_2EnabledAndSupported() throws Exception {
+        String methodName = "isFIPS140_2EnabledAndSupported";
+        JavaInfo serverJavaInfo = JavaInfo.forServer(this);
+        boolean isIBMJVM8 = (serverJavaInfo.majorVersion() == 8) && (serverJavaInfo.VENDOR == Vendor.IBM);
+        if (GLOBAL_FIPS_140_2) {
+            Log.info(c, methodName, "Liberty server is running JDK version: " + serverJavaInfo.majorVersion() + " and vendor: " + serverJavaInfo.VENDOR);
+            if (isIBMJVM8) {
+                Log.info(c, methodName, "global build properties FIPS_140_2 is set for server " + getServerName() +
+                                        " and IBM java 8 is available to run with FIPS 140-2 enabled.");
+            } else {
+                Log.info(c, methodName, "The global build properties FIPS_140_2 is set for server " + getServerName() +
+                                        ",  but no IBM java 8 on liberty server to run with FIPS 140-2 enabled.");
+            }
+        }
+        return GLOBAL_FIPS_140_2 && isIBMJVM8;
+    }
+
+    //FIPS 140-2
+    public void updateJavaDotSecurity(String javaHome) throws Exception {
+
+        String methodName = "updateJavaDotSecurity";
+        String javaSecurityFilePath = javaHome + "/jre/lib/security/java.security";
+
+        try {
+            List<String> lines = Files.readAllLines(Paths.get(javaSecurityFilePath));
+
+            //update existing security.provider by bumping up one number to leave room for new provider IBMJCEPlusFIPS 
+            for (int i = 0; i < lines.size(); i++) {
+                String line = lines.get(i);
+
+                if (line.startsWith("security.provider.2=com.ibm.crypto.plus.provider.IBMJCEPlus")) {
+                    lines.set(i, "security.provider.3=com.ibm.crypto.plus.provider.IBMJCEPlus");
+                }
+
+                if (line.startsWith("security.provider.3=com.ibm.crypto.provider.IBMJCE")) {
+                    lines.set(i, "security.provider.4=com.ibm.crypto.provider.IBMJCE");
+                }
+
+                if (line.startsWith("security.provider.4=com.ibm.security.jgss.IBMJGSSProvider")) {
+                    lines.set(i, "security.provider.5=com.ibm.security.jgss.IBMJGSSProvider");
+                }
+
+                if (line.startsWith("security.provider.5=com.ibm.security.cert.IBMCertPath")) {
+                    lines.set(i, "security.provider.6=com.ibm.security.cert.IBMCertPath");
+                }
+
+                if (line.startsWith("security.provider.6=com.ibm.security.sasl.IBMSASL")) {
+                    lines.set(i, "security.provider.7=com.ibm.security.sasl.IBMSASL");
+                }
+
+                if (line.startsWith("security.provider.7=org.jcp.xml.dsig.internal.dom.XMLDSigRI")) {
+                    lines.set(i, "security.provider.8=org.jcp.xml.dsig.internal.dom.XMLDSigRI");
+                }
+
+                if (line.startsWith("security.provider.8=com.ibm.xml.enc.IBMXMLEncProvider")) {
+                    lines.set(i, "security.provider.9=com.ibm.xml.enc.IBMXMLEncProvider");
+                }
+
+                if (line.startsWith("security.provider.9=com.ibm.security.jgss.mech.spnego.IBMSPNEGO")) {
+                    lines.set(i, "security.provider.10=com.ibm.security.jgss.mech.spnego.IBMSPNEGO");
+                }
+
+                if (line.startsWith("security.provider.10=sun.security.provider.Sun")) {
+                    lines.set(i, "security.provider.11=sun.security.provider.Sun");
+                }
+
+            }
+
+            Files.write(Paths.get(javaSecurityFilePath), lines);
+            Log.info(c, methodName, "java.security file updated successfully.");
+
+        } catch (IOException e) {
+            Log.info(c, methodName, "Error updating java.security file: " + e);
+        }
+
+        //Add new provider
+        String newLine = "security.provider.2=com.ibm.crypto.plus.provider.IBMJCEPlusFIPS"; 
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(javaSecurityFilePath, true))) {
+            writer.newLine(); 
+            writer.write(newLine);
+        } catch (IOException e) {
+            Log.info(c, methodName, "Error writing to java.security file: " + e);
+        }
+
+    }
+    
     //FIPS 140-3
     public boolean isFIPS140_3EnabledAndSupported() throws Exception {
         String methodName = "isFIPS140_3EnabledAndSupported";
